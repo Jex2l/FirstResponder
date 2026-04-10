@@ -1,12 +1,12 @@
 -- FirstResponder Copilot - Database Schema
 -- All tables indexed by BIN (Building Identification Number) for instant address lookups
--- Uses DuckDB for fast analytical queries on the GB10
+-- Uses DuckDB for fast analytical queries on the NVIDIA GB10
 
 -----------------------------------------------
 -- CORE: Building Profile
 -----------------------------------------------
 CREATE TABLE IF NOT EXISTS buildings (
-    bin VARCHAR PRIMARY KEY,          -- Building Identification Number
+    bin VARCHAR PRIMARY KEY,
     borough VARCHAR,
     block VARCHAR,
     lot VARCHAR,
@@ -25,7 +25,6 @@ CREATE TABLE IF NOT EXISTS buildings (
     owner_name VARCHAR,
     latitude DOUBLE,
     longitude DOUBLE,
-    -- Enriched fields (computed during ingestion)
     risk_score DOUBLE DEFAULT 0.0,
     last_updated TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 );
@@ -44,12 +43,12 @@ CREATE TABLE IF NOT EXISTS dob_violations (
     lot VARCHAR,
     violation_type VARCHAR,
     violation_number VARCHAR,
-    violation_category VARCHAR,       -- e.g., "GENERAL", "ELEVATOR", "CONSTRUCTION"
+    violation_category VARCHAR,
     description TEXT,
     disposition_date DATE,
     disposition_comments TEXT,
     issue_date DATE,
-    severity VARCHAR,                 -- Computed: CRITICAL / HIGH / MEDIUM / LOW
+    severity VARCHAR,                 -- CRITICAL / HIGH / MEDIUM / LOW
     is_active BOOLEAN DEFAULT TRUE,
     FOREIGN KEY (bin) REFERENCES buildings(bin)
 );
@@ -59,7 +58,7 @@ CREATE INDEX IF NOT EXISTS idx_dob_viol_date ON dob_violations(issue_date);
 CREATE INDEX IF NOT EXISTS idx_dob_viol_active ON dob_violations(is_active);
 
 -----------------------------------------------
--- DOB Safety Violations (subset but critical)
+-- DOB Safety Violations
 -----------------------------------------------
 CREATE TABLE IF NOT EXISTS dob_safety_violations (
     id INTEGER PRIMARY KEY,
@@ -73,6 +72,59 @@ CREATE TABLE IF NOT EXISTS dob_safety_violations (
 );
 
 CREATE INDEX IF NOT EXISTS idx_dob_safety_bin ON dob_safety_violations(bin);
+
+-----------------------------------------------
+-- DOB ECB Violations (Environmental Control Board)
+-- Penalty amounts and infraction codes — key neglect signal
+-----------------------------------------------
+CREATE TABLE IF NOT EXISTS dob_ecb_violations (
+    ecb_violation_number VARCHAR PRIMARY KEY,
+    bin VARCHAR,
+    block VARCHAR,
+    lot VARCHAR,
+    violation_type VARCHAR,
+    violation_description TEXT,
+    infraction_code VARCHAR,
+    section_law_description TEXT,
+    penalty_imposed DOUBLE,           -- Financial penalty — high amounts = serious neglect
+    amount_paid DOUBLE,
+    balance_due DOUBLE,               -- Unpaid balance = owner non-compliance signal
+    hearing_date DATE,
+    hearing_status VARCHAR,
+    served_date DATE,
+    issue_date DATE,
+    severity VARCHAR,                 -- CRITICAL / HIGH / MEDIUM / LOW
+    is_active BOOLEAN DEFAULT TRUE,
+    FOREIGN KEY (bin) REFERENCES buildings(bin)
+);
+
+CREATE INDEX IF NOT EXISTS idx_ecb_bin ON dob_ecb_violations(bin);
+CREATE INDEX IF NOT EXISTS idx_ecb_active ON dob_ecb_violations(is_active);
+CREATE INDEX IF NOT EXISTS idx_ecb_balance ON dob_ecb_violations(balance_due);
+
+-----------------------------------------------
+-- Bureau of Fire Prevention Inspections
+-- Sprinkler, standpipe, suppression system status
+-- CRITICAL for first responders — know before entry
+-----------------------------------------------
+CREATE TABLE IF NOT EXISTS fire_prevention_inspections (
+    id INTEGER PRIMARY KEY,
+    bin VARCHAR,
+    address VARCHAR,
+    borough VARCHAR,
+    inspection_date DATE,
+    inspection_type VARCHAR,          -- SPRINKLER / STANDPIPE / SUPPRESSION / GENERAL
+    result VARCHAR,                   -- PASSED / FAILED / PARTIAL
+    violation_description TEXT,
+    certificate_number VARCHAR,
+    expiration_date DATE,
+    is_compliant BOOLEAN,             -- Quick flag for brief generation
+    FOREIGN KEY (bin) REFERENCES buildings(bin)
+);
+
+CREATE INDEX IF NOT EXISTS idx_fire_prev_bin ON fire_prevention_inspections(bin);
+CREATE INDEX IF NOT EXISTS idx_fire_prev_compliant ON fire_prevention_inspections(is_compliant);
+CREATE INDEX IF NOT EXISTS idx_fire_prev_date ON fire_prevention_inspections(inspection_date);
 
 -----------------------------------------------
 -- HPD Housing Violations
@@ -120,8 +172,8 @@ CREATE TABLE IF NOT EXISTS hpd_complaints (
     apartment VARCHAR,
     status VARCHAR,
     status_date DATE,
-    complaint_type VARCHAR,           -- e.g., EMERGENCY, NON EMERGENCY
-    major_category VARCHAR,           -- e.g., PLUMBING, ELECTRIC, GAS, HEAT/HOT WATER
+    complaint_type VARCHAR,
+    major_category VARCHAR,           -- PLUMBING, ELECTRIC, GAS, HEAT/HOT WATER
     minor_category VARCHAR,
     code VARCHAR,
     problem_description TEXT,
@@ -135,7 +187,7 @@ CREATE INDEX IF NOT EXISTS idx_hpd_comp_category ON hpd_complaints(major_categor
 CREATE INDEX IF NOT EXISTS idx_hpd_comp_date ON hpd_complaints(received_date);
 
 -----------------------------------------------
--- 311 Service Requests (filtered for safety-relevant)
+-- 311 Service Requests (safety-relevant only)
 -----------------------------------------------
 CREATE TABLE IF NOT EXISTS service_requests_311 (
     unique_key VARCHAR PRIMARY KEY,
@@ -152,7 +204,7 @@ CREATE TABLE IF NOT EXISTS service_requests_311 (
     borough VARCHAR,
     latitude DOUBLE,
     longitude DOUBLE,
-    bin VARCHAR,                       -- May need to be geocoded/matched
+    bin VARCHAR,
     status VARCHAR,
     resolution_description TEXT,
     FOREIGN KEY (bin) REFERENCES buildings(bin)
@@ -192,7 +244,9 @@ CREATE INDEX IF NOT EXISTS idx_fire_inc_date ON fire_incidents(incident_datetime
 CREATE INDEX IF NOT EXISTS idx_fire_inc_type ON fire_incidents(incident_classification);
 
 -----------------------------------------------
--- Fire Company Incidents (detailed)
+-- Fire Company Incidents (detailed tactical data)
+-- Floor of fire origin, suppression systems, spread
+-- Most operationally valuable for brief generation
 -----------------------------------------------
 CREATE TABLE IF NOT EXISTS fire_company_incidents (
     id INTEGER PRIMARY KEY,
@@ -209,11 +263,11 @@ CREATE TABLE IF NOT EXISTS fire_company_incidents (
     street_highway VARCHAR,
     zip_code VARCHAR,
     borough_desc VARCHAR,
-    floor_of_fire_origin VARCHAR,
+    floor_of_fire_origin VARCHAR,     -- Which floor — critical tactical info
     fire_origin_below_grade BOOLEAN,
-    fire_spread_desc VARCHAR,
-    detector_presence_desc VARCHAR,
-    aes_presence_desc VARCHAR,        -- Automatic Extinguishing System
+    fire_spread_desc VARCHAR,         -- How fire spread — indicates building integrity
+    detector_presence_desc VARCHAR,   -- Were detectors present/functional?
+    aes_presence_desc VARCHAR,        -- Automatic Extinguishing System present?
     standpipe_system_type_desc VARCHAR,
     latitude DOUBLE,
     longitude DOUBLE
@@ -221,6 +275,7 @@ CREATE TABLE IF NOT EXISTS fire_company_incidents (
 
 CREATE INDEX IF NOT EXISTS idx_fire_co_date ON fire_company_incidents(incident_date_time);
 CREATE INDEX IF NOT EXISTS idx_fire_co_geo ON fire_company_incidents(latitude, longitude);
+CREATE INDEX IF NOT EXISTS idx_fire_co_key ON fire_company_incidents(im_incident_key);
 
 -----------------------------------------------
 -- EMS Incident Dispatch
@@ -247,24 +302,7 @@ CREATE TABLE IF NOT EXISTS ems_incidents (
 
 CREATE INDEX IF NOT EXISTS idx_ems_date ON ems_incidents(incident_datetime);
 CREATE INDEX IF NOT EXISTS idx_ems_geo ON ems_incidents(latitude, longitude);
-
------------------------------------------------
--- NYPD Complaint Data
------------------------------------------------
-CREATE TABLE IF NOT EXISTS nypd_complaints (
-    cmplnt_num VARCHAR PRIMARY KEY,
-    cmplnt_fr_dt DATE,
-    cmplnt_fr_tm TIME,
-    ofns_desc VARCHAR,
-    law_cat_cd VARCHAR,               -- FELONY / MISDEMEANOR / VIOLATION
-    boro_nm VARCHAR,
-    prem_typ_desc VARCHAR,
-    latitude DOUBLE,
-    longitude DOUBLE
-);
-
-CREATE INDEX IF NOT EXISTS idx_nypd_date ON nypd_complaints(cmplnt_fr_dt);
-CREATE INDEX IF NOT EXISTS idx_nypd_geo ON nypd_complaints(latitude, longitude);
+CREATE INDEX IF NOT EXISTS idx_ems_type ON ems_incidents(final_call_type);
 
 -----------------------------------------------
 -- Fire Hydrants
@@ -280,7 +318,7 @@ CREATE TABLE IF NOT EXISTS fire_hydrants (
 CREATE INDEX IF NOT EXISTS idx_hydrants_geo ON fire_hydrants(latitude, longitude);
 
 -----------------------------------------------
--- Hospitals & Facilities
+-- Hospitals & Trauma Centers
 -----------------------------------------------
 CREATE TABLE IF NOT EXISTS hospitals (
     facility_name VARCHAR,
@@ -307,28 +345,32 @@ CREATE TABLE IF NOT EXISTS elevators (
     speed VARCHAR,
     capacity VARCHAR,
     approval_date DATE,
-    status VARCHAR,
+    status VARCHAR,                   -- ACTIVE / INACTIVE / OUT OF SERVICE
     FOREIGN KEY (bin) REFERENCES buildings(bin)
 );
 
 CREATE INDEX IF NOT EXISTS idx_elevators_bin ON elevators(bin);
+CREATE INDEX IF NOT EXISTS idx_elevators_status ON elevators(status);
 
 -----------------------------------------------
--- Building Owner Portfolio (computed table)
+-- Building Owner Portfolio (computed)
+-- Enables landlord neglect pattern detection
 -----------------------------------------------
 CREATE TABLE IF NOT EXISTS owner_portfolio (
     owner_name VARCHAR,
     total_buildings INTEGER,
     total_open_violations INTEGER,
     total_class_c_violations INTEGER,
+    total_ecb_balance_due DOUBLE,     -- Total unpaid ECB fines — strong neglect signal
     avg_violations_per_building DOUBLE,
-    bins TEXT                          -- Comma-separated list of BINs
+    bins TEXT                         -- Comma-separated BINs
 );
 
 CREATE INDEX IF NOT EXISTS idx_owner_name ON owner_portfolio(owner_name);
 
 -----------------------------------------------
--- Precomputed Risk Scores
+-- Precomputed Risk Scores (per building)
+-- Used by query_engine.py for instant brief generation
 -----------------------------------------------
 CREATE TABLE IF NOT EXISTS building_risk_scores (
     bin VARCHAR PRIMARY KEY,
@@ -336,13 +378,14 @@ CREATE TABLE IF NOT EXISTS building_risk_scores (
     structural_risk DOUBLE,
     fire_risk DOUBLE,
     hazmat_risk DOUBLE,
-    crime_risk DOUBLE,
-    complaint_velocity_30d INTEGER,    -- 311 + HPD complaints last 30 days
+    suppression_system_compliant BOOLEAN,  -- From fire prevention inspections
+    complaint_velocity_30d INTEGER,
     complaint_velocity_90d INTEGER,
     complaint_velocity_365d INTEGER,
     active_dob_violations INTEGER,
-    active_hpd_class_c INTEGER,       -- Immediately hazardous
-    active_hpd_class_b INTEGER,       -- Hazardous
+    active_ecb_violations INTEGER,         -- ECB unpaid balance count
+    active_hpd_class_c INTEGER,
+    active_hpd_class_b INTEGER,
     prior_fire_incidents INTEGER,
     prior_ems_incidents INTEGER,
     last_fdny_inspection_pass BOOLEAN,
