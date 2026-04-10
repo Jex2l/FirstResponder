@@ -1,0 +1,21 @@
+# FirstResponder Copilot - Dependencies
+# Install: pip install -r requirements.txt
+
+# Core
+duckdb>=1.0.0
+requests>=2.31.0
+
+# Web UI
+fastapi>=0.109.0
+uvicorn>=0.27.0
+jinja2>=3.1.0
+python-multipart>=0.0.6
+
+# Data processing
+pandas>=2.1.0
+
+# Geospatial (optional, for advanced routing)
+# geopy>=2.4.0
+
+# For development
+rich>=13.0.0      # Pretty terminal output
