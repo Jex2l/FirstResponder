@@ -11,6 +11,7 @@ Usage:
 """
 
 import duckdb
+import re
 import json
 import math
 from dataclasses import dataclass, field, asdict
@@ -282,40 +283,151 @@ class BuildingIntelligence:
                 "construction_type", "owner_name", "latitude", "longitude"]
         return dict(zip(cols, result))
     
+    def _normalize_address_text(self, s: str) -> str:
+        """Normalize address text for better matching."""
+        if not s:
+            return ""
+
+        s = s.upper().strip()
+
+        replacements = {
+            "FIFTH": "5",
+            "FIRST": "1",
+            "SECOND": "2",
+            "THIRD": "3",
+            "FOURTH": "4",
+            "SIXTH": "6",
+            "SEVENTH": "7",
+            "EIGHTH": "8",
+            "NINTH": "9",
+            "TENTH": "10",
+            "ELEVENTH": "11",
+            "TWELFTH": "12",
+            "THIRTEENTH": "13",
+            "FOURTEENTH": "14",
+            "FIFTEENTH": "15",
+            "SIXTEENTH": "16",
+            "SEVENTEENTH": "17",
+            "EIGHTEENTH": "18",
+            "NINETEENTH": "19",
+            "TWENTIETH": "20",
+            "AVENUE": "AVE",
+            "AVE.": "AVE",
+            "STREET": "ST",
+            "ST.": "ST",
+            "ROAD": "RD",
+            "RD.": "RD",
+            "BOULEVARD": "BLVD",
+            "BLVD.": "BLVD",
+            "PLACE": "PL",
+            "PLAZA": "PLZ",
+            "DRIVE": "DR",
+            "COURT": "CT",
+            "LANE": "LN",
+        }
+
+        for old, new in replacements.items():
+            s = re.sub(rf"\b{re.escape(old)}\b", new, s)
+
+        # Convert ordinals like 5TH -> 5, 21ST -> 21
+        s = re.sub(r"\b(\d+)(ST|ND|RD|TH)\b", r"\1", s)
+
+        # Collapse spaces
+        s = re.sub(r"\s+", " ", s).strip()
+        return s
+    
+    def _split_house_and_street(self, s: str):
+        """
+        Split '350 5TH AVENUE' -> (350, '5 AVE')
+        Returns (house_number:int|None, street:str)
+        """
+        s = self._normalize_address_text(s)
+        m = re.match(r"^\s*(\d+)\s+(.*)$", s)
+        if not m:
+            return None, s
+        return int(m.group(1)), m.group(2).strip()
+
     def _get_building_by_address(self, address: str) -> Optional[Dict]:
         addr_upper = address.upper().strip()
-        
-        # Try exact match first
+        norm_input = self._normalize_address_text(addr_upper)
+        input_num, input_street = self._split_house_and_street(norm_input)
+
+        cols = [
+            "bin", "address", "borough", "zipcode", "borough_code",
+            "num_floors", "year_built", "building_class", "land_use",
+            "residential_units", "total_units", "lot_area", "building_area",
+            "construction_type", "owner_name", "latitude", "longitude"
+        ]
+
+        # 1) Exact raw match
         result = self.con.execute("""
             SELECT bin, address, borough, zipcode, borough_code,
-                   num_floors, year_built, building_class, land_use,
-                   residential_units, total_units, lot_area, building_area,
-                   construction_type, owner_name, latitude, longitude
-            FROM buildings 
+                num_floors, year_built, building_class, land_use,
+                residential_units, total_units, lot_area, building_area,
+                construction_type, owner_name, latitude, longitude
+            FROM buildings
             WHERE UPPER(address) = ?
             LIMIT 1
         """, [addr_upper]).fetchone()
-        
-        # Fuzzy match if exact fails
-        if not result:
-            result = self.con.execute("""
-                SELECT bin, address, borough, zipcode, borough_code,
-                       num_floors, year_built, building_class, land_use,
-                       residential_units, total_units, lot_area, building_area,
-                       construction_type, owner_name, latitude, longitude
-                FROM buildings 
-                WHERE UPPER(address) LIKE ?
-                LIMIT 1
-            """, [f"%{addr_upper}%"]).fetchone()
-        
-        if not result:
-            return None
-        
-        cols = ["bin", "address", "borough", "zipcode", "borough_code",
-                "num_floors", "year_built", "building_class", "land_use",
-                "residential_units", "total_units", "lot_area", "building_area",
-                "construction_type", "owner_name", "latitude", "longitude"]
-        return dict(zip(cols, result))
+
+        if result:
+            return dict(zip(cols, result))
+
+        # 2) Exact normalized match across candidate rows
+        candidates = self.con.execute("""
+            SELECT bin, address, borough, zipcode, borough_code,
+                num_floors, year_built, building_class, land_use,
+                residential_units, total_units, lot_area, building_area,
+                construction_type, owner_name, latitude, longitude
+            FROM buildings
+            WHERE UPPER(address) LIKE ?
+            LIMIT 200
+        """, [f"%{input_street if input_street else norm_input}%"]).fetchall()
+
+        normalized_exact = []
+        for row in candidates:
+            row_dict = dict(zip(cols, row))
+            row_norm = self._normalize_address_text(row_dict["address"] or "")
+            if row_norm == norm_input:
+                normalized_exact.append(row_dict)
+
+        if normalized_exact:
+            return normalized_exact[0]
+
+        # 3) Same street, nearest house number
+        same_street = []
+        for row in candidates:
+            row_dict = dict(zip(cols, row))
+            row_norm = self._normalize_address_text(row_dict["address"] or "")
+            row_num, row_street = self._split_house_and_street(row_norm)
+
+            if input_street and row_street == input_street:
+                diff = abs(row_num - input_num) if row_num is not None and input_num is not None else 10**9
+                same_street.append((diff, row_num or 10**9, row_dict))
+
+        if same_street:
+            same_street.sort(key=lambda x: (x[0], x[1]))
+            best_diff, _, best_row = same_street[0]
+
+            # Only accept "nearest number" if reasonably close
+            if best_diff <= 20:
+                return best_row
+
+        # 4) Broad fallback
+        result = self.con.execute("""
+            SELECT bin, address, borough, zipcode, borough_code,
+                num_floors, year_built, building_class, land_use,
+                residential_units, total_units, lot_area, building_area,
+                construction_type, owner_name, latitude, longitude
+            FROM buildings
+            WHERE UPPER(address) LIKE ?
+            LIMIT 1
+        """, [f"%{addr_upper}%"]).fetchone()
+
+        if result:
+            return dict(zip(cols, result))
+
+        return None
     
     def _get_dob_violations(self, bin_id: str) -> List[ViolationSummary]:
         results = self.con.execute("""
